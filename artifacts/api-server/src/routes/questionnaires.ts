@@ -1,0 +1,328 @@
+/**
+ * Questionnaire routes.
+ *
+ * Patient routes (require patient session):
+ *   GET  /api/questionnaires/:appointmentId        — load current questionnaire
+ *   POST /api/questionnaires/:appointmentId/save   — save in progress
+ *   POST /api/questionnaires/:appointmentId/submit — submit
+ *   POST /api/questionnaires/:appointmentId/consent — record consent (before questionnaire opens)
+ *
+ * Doctor routes (require doctor role):
+ *   GET  /api/questionnaires/:appointmentId/doctor — full clinical view (audited)
+ *
+ * All save/submit actions trigger summary regeneration.
+ */
+import { Router } from "express";
+import {
+  db, questionnairesTable, appointmentsTable, summariesTable, AUDIT_ACTIONS,
+} from "../lib/db";
+import { eq } from "drizzle-orm";
+import { requirePatientAuth, requireStaffAuth } from "../middlewares/authenticate";
+import { clinicalContentGuard } from "../middlewares/rbac";
+import { writeAuditLog, linkAuditCtx, userAuditCtx } from "../services/audit";
+import { generateSummaries } from "../services/summary";
+import { extractClientIp } from "../middlewares/audit-middleware";
+import { z } from "zod";
+
+const router = Router();
+
+// Patient: record consent before questionnaire opens (required per compliance)
+router.post("/:appointmentId/consent", requirePatientAuth, async (req, res, next) => {
+  try {
+    const { appointmentId } = req.params as Record<string, string>;
+    const ip = extractClientIp(req);
+    const linkId = req.patientSession!.sub;
+
+    if (req.patientSession!.appointmentId !== appointmentId) {
+      res.status(403).json({ error: "Forbidden" });
+      return;
+    }
+
+    const { consentVersion } = req.body as { consentVersion?: string };
+
+    await db
+      .update(questionnairesTable)
+      .set({
+        consentGivenAt: new Date(),
+        consentVersion: consentVersion ?? "v1",
+        updatedAt: new Date(),
+      })
+      .where(eq(questionnairesTable.appointmentId, appointmentId));
+
+    await writeAuditLog({
+      ctx: linkAuditCtx(linkId, ip),
+      action: AUDIT_ACTIONS.CONSENT_GIVEN,
+      targetType: "questionnaire",
+      outcome: "success",
+      context: { appointmentId, consentVersion },
+    });
+
+    res.json({ ok: true });
+  } catch (err) {
+    next(err);
+  }
+});
+
+// Patient: get current questionnaire state
+router.get("/:appointmentId", requirePatientAuth, async (req, res, next) => {
+  try {
+    const { appointmentId } = req.params as Record<string, string>;
+
+    if (req.patientSession!.appointmentId !== appointmentId) {
+      res.status(403).json({ error: "Forbidden" });
+      return;
+    }
+
+    const [questionnaire] = await db
+      .select()
+      .from(questionnairesTable)
+      .where(eq(questionnairesTable.appointmentId, appointmentId))
+      .limit(1);
+
+    const [appointment] = await db
+      .select({
+        status: appointmentsTable.status,
+        scheduledAt: appointmentsTable.scheduledAt,
+        appointmentType: appointmentsTable.appointmentType,
+      })
+      .from(appointmentsTable)
+      .where(eq(appointmentsTable.id, appointmentId))
+      .limit(1);
+
+    if (!appointment) {
+      res.status(404).json({ error: "Appointment not found" });
+      return;
+    }
+
+    const isLocked =
+      appointment.status === "locked" ||
+      (appointment.status !== "reopened" && new Date(appointment.scheduledAt) <= new Date());
+
+    res.json({
+      questionnaire: questionnaire ?? null,
+      isLocked,
+      appointment: {
+        status: appointment.status,
+        scheduledAt: appointment.scheduledAt,
+        appointmentType: appointment.appointmentType,
+      },
+    });
+  } catch (err) {
+    next(err);
+  }
+});
+
+const answersSchema = z.record(z.string(), z.unknown());
+
+// Patient: save questionnaire (can save and return until lock)
+router.post("/:appointmentId/save", requirePatientAuth, async (req, res, next) => {
+  try {
+    const { appointmentId } = req.params as Record<string, string>;
+    const ip = extractClientIp(req);
+    const linkId = req.patientSession!.sub;
+
+    if (req.patientSession!.appointmentId !== appointmentId) {
+      res.status(403).json({ error: "Forbidden" });
+      return;
+    }
+
+    // Check lock state
+    const [appointment] = await db
+      .select({ status: appointmentsTable.status, scheduledAt: appointmentsTable.scheduledAt })
+      .from(appointmentsTable)
+      .where(eq(appointmentsTable.id, appointmentId))
+      .limit(1);
+
+    if (!appointment) {
+      res.status(404).json({ error: "Appointment not found" });
+      return;
+    }
+
+    const isLocked =
+      appointment.status === "locked" ||
+      (appointment.status !== "reopened" && new Date(appointment.scheduledAt) <= new Date());
+
+    if (isLocked) {
+      res.status(409).json({
+        error: "Questionnaire is locked. Contact the clinic to reopen.",
+        code: "QUESTIONNAIRE_LOCKED",
+      });
+      return;
+    }
+
+    const parse = answersSchema.safeParse(req.body.answers);
+    if (!parse.success) {
+      res.status(400).json({ error: "Invalid answers format" });
+      return;
+    }
+
+    const now = new Date();
+
+    // Upsert questionnaire
+    const [questionnaire] = await db
+      .insert(questionnairesTable)
+      .values({
+        appointmentId,
+        answers: parse.data,
+        status: "saved",
+        savedAt: now,
+      })
+      .onConflictDoUpdate({
+        target: questionnairesTable.appointmentId,
+        set: {
+          answers: parse.data,
+          status: "saved",
+          savedAt: now,
+          updatedAt: now,
+        },
+      })
+      .returning();
+
+    // Update appointment status
+    await db
+      .update(appointmentsTable)
+      .set({ status: "in_progress", updatedAt: now })
+      .where(eq(appointmentsTable.id, appointmentId));
+
+    await writeAuditLog({
+      ctx: linkAuditCtx(linkId, ip),
+      action: AUDIT_ACTIONS.QUESTIONNAIRE_SAVE,
+      targetType: "questionnaire",
+      targetId: questionnaire.id,
+      outcome: "success",
+    });
+
+    // Trigger summary regeneration (async, non-blocking for response)
+    generateSummaries(appointmentId).catch((err) => {
+      // Log but don't fail the save
+      import("../lib/logger").then(({ logger }) =>
+        logger.error({ err, appointmentId }, "Summary generation failed after save")
+      );
+    });
+
+    res.json({ ok: true, savedAt: now, questionnaireId: questionnaire.id });
+  } catch (err) {
+    next(err);
+  }
+});
+
+// Patient: submit questionnaire
+router.post("/:appointmentId/submit", requirePatientAuth, async (req, res, next) => {
+  try {
+    const { appointmentId } = req.params as Record<string, string>;
+    const ip = extractClientIp(req);
+    const linkId = req.patientSession!.sub;
+
+    if (req.patientSession!.appointmentId !== appointmentId) {
+      res.status(403).json({ error: "Forbidden" });
+      return;
+    }
+
+    const [appointment] = await db
+      .select({ status: appointmentsTable.status, scheduledAt: appointmentsTable.scheduledAt })
+      .from(appointmentsTable)
+      .where(eq(appointmentsTable.id, appointmentId))
+      .limit(1);
+
+    if (!appointment) {
+      res.status(404).json({ error: "Appointment not found" });
+      return;
+    }
+
+    const isLocked =
+      appointment.status === "locked" ||
+      (appointment.status !== "reopened" && new Date(appointment.scheduledAt) <= new Date());
+
+    if (isLocked) {
+      res.status(409).json({ error: "Questionnaire is locked", code: "QUESTIONNAIRE_LOCKED" });
+      return;
+    }
+
+    const parse = answersSchema.safeParse(req.body.answers);
+    if (!parse.success) {
+      res.status(400).json({ error: "Invalid answers format" });
+      return;
+    }
+
+    const now = new Date();
+
+    const [questionnaire] = await db
+      .insert(questionnairesTable)
+      .values({
+        appointmentId,
+        answers: parse.data,
+        status: "submitted",
+        savedAt: now,
+        submittedAt: now,
+      })
+      .onConflictDoUpdate({
+        target: questionnairesTable.appointmentId,
+        set: {
+          answers: parse.data,
+          status: "submitted",
+          savedAt: now,
+          submittedAt: now,
+          updatedAt: now,
+        },
+      })
+      .returning();
+
+    await db
+      .update(appointmentsTable)
+      .set({ status: "submitted", updatedAt: now })
+      .where(eq(appointmentsTable.id, appointmentId));
+
+    await writeAuditLog({
+      ctx: linkAuditCtx(linkId, ip),
+      action: AUDIT_ACTIONS.QUESTIONNAIRE_SUBMIT,
+      targetType: "questionnaire",
+      targetId: questionnaire.id,
+      outcome: "success",
+    });
+
+    generateSummaries(appointmentId).catch((err) => {
+      import("../lib/logger").then(({ logger }) =>
+        logger.error({ err, appointmentId }, "Summary generation failed after submit")
+      );
+    });
+
+    res.json({ ok: true, submittedAt: now });
+  } catch (err) {
+    next(err);
+  }
+});
+
+// Doctor: view questionnaire clinical content (audited)
+router.get("/:appointmentId/doctor", requireStaffAuth, clinicalContentGuard, async (req, res, next) => {
+  try {
+    const { appointmentId } = req.params as Record<string, string>;
+    const ip = extractClientIp(req);
+    const userId = req.user!.sub;
+
+    const [questionnaire] = await db
+      .select()
+      .from(questionnairesTable)
+      .where(eq(questionnairesTable.appointmentId, appointmentId))
+      .limit(1);
+
+    await writeAuditLog({
+      ctx: userAuditCtx(userId, req.user!.role, ip),
+      action: AUDIT_ACTIONS.QUESTIONNAIRE_VIEW,
+      targetType: "questionnaire",
+      targetId: questionnaire?.id,
+      outcome: questionnaire ? "success" : "failed",
+      context: { appointmentId },
+    });
+
+    if (!questionnaire) {
+      res.status(404).json({ error: "Questionnaire not found" });
+      return;
+    }
+
+    res.json(questionnaire);
+  } catch (err) {
+    next(err);
+  }
+});
+
+export default router;
