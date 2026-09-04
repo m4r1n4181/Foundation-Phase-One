@@ -1,3 +1,4 @@
 - [Phase 1 foundation state](phase1-state.md) — what was built, what's stubbed, what's blocked; read before starting Phase 2 features
 - [Zod v3 API notes](zod-v3-api.md) — zod v3 quirks in this codebase (no z.email(), no zod/v4 subpath)
 - [Express v5 params typing](express-v5-params.md) — req.params is Record<string, string | string[]>; always cast with `as Record<string, string>`
+- [Clinic portal build environment](clinic-portal-build-env.md) — standalone Vite builds need the artifact PORT and BASE_PATH values supplied by the managed workflow

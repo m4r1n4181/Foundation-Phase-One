@@ -161,7 +161,77 @@ router.get("/:appointmentId", requirePatientAuth, async (req, res, next) => {
       .from(uploadedDocumentsTable)
       .where(eq(uploadedDocumentsTable.appointmentId, appointmentId));
 
-    res.json({ documents: docs });
+    res.json(docs);
+  } catch (err) {
+    next(err);
+  }
+});
+
+/**
+ * POST /api/uploads/:appointmentId/status
+ * Save the patient's declaration when there is no digital file to upload.
+ */
+router.post("/:appointmentId/status", requirePatientAuth, async (req, res, next) => {
+  try {
+    const { appointmentId } = req.params as Record<string, string>;
+    const linkId = req.patientSession!.sub;
+    const ip = extractClientIp(req);
+
+    if (req.patientSession!.appointmentId !== appointmentId) {
+      res.status(403).json({ error: "Forbidden" });
+      return;
+    }
+
+    const parse = z.object({
+      labStatus: z.enum([
+        "uploaded_digitally",
+        "will_bring_physical",
+        "results_pending",
+        "no_results_available",
+        "not_required",
+      ]),
+    }).safeParse(req.body);
+
+    if (!parse.success) {
+      res.status(400).json({ error: "Invalid lab status", issues: parse.error.issues });
+      return;
+    }
+
+    const [appointment] = await db
+      .select({ status: appointmentsTable.status, scheduledAt: appointmentsTable.scheduledAt })
+      .from(appointmentsTable)
+      .where(eq(appointmentsTable.id, appointmentId))
+      .limit(1);
+
+    if (!appointment) {
+      res.status(404).json({ error: "Appointment not found" });
+      return;
+    }
+
+    const isLocked =
+      appointment.status === "locked" ||
+      (appointment.status !== "reopened" && new Date(appointment.scheduledAt) <= new Date());
+
+    if (isLocked) {
+      res.status(409).json({ error: "Preparation is locked", code: "QUESTIONNAIRE_LOCKED" });
+      return;
+    }
+
+    await db
+      .update(appointmentsTable)
+      .set({ labStatus: parse.data.labStatus, updatedAt: new Date() })
+      .where(eq(appointmentsTable.id, appointmentId));
+
+    await writeAuditLog({
+      ctx: linkAuditCtx(linkId, ip),
+      action: AUDIT_ACTIONS.DOCUMENT_UPLOAD,
+      targetType: "appointment",
+      targetId: appointmentId,
+      outcome: "success",
+      context: { labStatus: parse.data.labStatus, declarationOnly: true },
+    });
+
+    res.json({ ok: true });
   } catch (err) {
     next(err);
   }

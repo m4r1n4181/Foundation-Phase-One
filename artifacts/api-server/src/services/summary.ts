@@ -59,6 +59,36 @@ function renderCurrentVisitSummary(
   generatedAt: Date
 ): string {
   const lines: string[] = [];
+  const currentTherapy = (answers.currentTherapy ?? answers.current_thyroid_therapy) as QuestionnaireAnswers["currentTherapy"];
+  const otherMedications = (answers.otherMedications ?? answers.other_medications) as QuestionnaireAnswers["otherMedications"];
+  const allergies = (
+    answers.allergies ??
+    (answers.has_allergies === true
+      ? [{ type: "alergija", allergen: String(answers.allergies_list ?? "") }]
+      : undefined)
+  ) as QuestionnaireAnswers["allergies"];
+  const lifestyleHabits = (
+    answers.lifestyleHabits ?? { smoking: answers.smoking, alcohol: answers.alcohol }
+  ) as QuestionnaireAnswers["lifestyleHabits"];
+  const diagnosisHistory = answers.diagnosisHistory ?? answers.diagnosis_history;
+  const ultrasoundHistory = answers.ultrasoundHistory ?? (
+    answers.has_ultrasound === true
+      ? String(answers.ultrasound_findings ?? "ultrazvuk rađen")
+      : answers.has_ultrasound === false
+        ? "ultrazvuk nije rađen"
+        : undefined
+  );
+  const additionalSymptoms = answers.additionalSymptoms ?? [
+    answers.cardiac_symptoms === true ? "kardiovaskularni simptomi" : "",
+    answers.musculoskeletal_symptoms === true ? "bolovi u kostima, zglobovima ili mišićima" : "",
+  ].filter(Boolean).join(", ");
+  const familyHistory = answers.familyHistory ?? (
+    answers.has_family_history === true
+      ? String(answers.family_history_details ?? "pozitivna porodična anamneza")
+      : answers.has_family_history === false
+        ? "negira relevantnu porodičnu anamnezu"
+        : undefined
+  );
 
   lines.push("PREGLED SPECIJALISTE – INTERNISTA-ENDOKRINOLOGA");
   lines.push(`Tip pregleda: ${appointmentType}`);
@@ -71,19 +101,19 @@ function renderCurrentVisitSummary(
   lines.push("");
 
   lines.push("SADAŠNJA BOLEST");
-  lines.push(`Dijagnoza štitaste žlezde: ${answers.diagnosisHistory || "– nije navedeno"}`);
-  lines.push(`UZ štitaste žlezde: ${answers.ultrasoundHistory || "– nije navedeno"}`);
-  lines.push(`Dodatni simptomi: ${answers.additionalSymptoms || "– nije navedeno"}`);
+  lines.push(`Dijagnoza štitaste žlezde: ${diagnosisHistory || "– nije navedeno"}`);
+  lines.push(`UZ štitaste žlezde: ${ultrasoundHistory || "– nije navedeno"}`);
+  lines.push(`Dodatni simptomi: ${additionalSymptoms || "– nije navedeno"}`);
   lines.push("");
 
   lines.push("TERAPIJA KOJU PACIJENT UZIMA");
-  lines.push(`Terapija štitnjače: ${formatMedications(answers.currentTherapy)}`);
-  lines.push(`Ostali lekovi: ${formatMedications(answers.otherMedications)}`);
-  lines.push(`Alergije: ${formatAllergies(answers.allergies)}`);
+  lines.push(`Terapija štitnjače: ${formatMedications(currentTherapy)}`);
+  lines.push(`Ostali lekovi: ${formatMedications(otherMedications)}`);
+  lines.push(`Alergije: ${formatAllergies(allergies)}`);
   lines.push("");
 
   lines.push("LIČNA ANAMNEZA");
-  const habits = answers.lifestyleHabits;
+  const habits = lifestyleHabits;
   lines.push(`Pušenje: ${habits?.smoking || "– nije navedeno"}`);
   lines.push(`Alkohol: ${habits?.alcohol || "– nije navedeno"}`);
   lines.push(`Ostalo: ${habits?.other || "– nije navedeno"}`);
@@ -95,7 +125,7 @@ function renderCurrentVisitSummary(
   lines.push("");
 
   lines.push("PORODIČNA ANAMNEZA");
-  lines.push(answers.familyHistory || "– pacijent nije naveo porodičnu anamnezu");
+  lines.push(familyHistory || "– pacijent nije naveo porodičnu anamnezu");
   lines.push("");
 
   lines.push("OBJEKTIVNO");

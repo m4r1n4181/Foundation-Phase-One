@@ -9,7 +9,7 @@ import { Router } from "express";
 import { db, usersTable, AUDIT_ACTIONS } from "../lib/db";
 import { eq } from "drizzle-orm";
 import { requireStaffAuth } from "../middlewares/authenticate";
-import { doctorOnly } from "../middlewares/rbac";
+import { requireRole } from "../middlewares/rbac";
 import { writeAuditLog, userAuditCtx } from "../services/audit";
 import { extractClientIp } from "../middlewares/audit-middleware";
 import argon2 from "argon2";
@@ -18,6 +18,7 @@ import { z } from "zod";
 const router = Router();
 
 router.use(requireStaffAuth);
+const clinicAdminOnly = requireRole("clinic_admin");
 
 const createUserSchema = z.object({
   email: z.string().email(),
@@ -28,7 +29,7 @@ const createUserSchema = z.object({
 });
 
 // POST /api/admin/users — create staff user (doctor-only for MVP)
-router.post("/users", doctorOnly, async (req, res, next) => {
+router.post("/users", clinicAdminOnly, async (req, res, next) => {
   try {
     const parse = createUserSchema.safeParse(req.body);
     if (!parse.success) {
@@ -74,7 +75,7 @@ router.post("/users", doctorOnly, async (req, res, next) => {
 });
 
 // GET /api/admin/users — list staff users
-router.get("/users", doctorOnly, async (req, res, next) => {
+router.get("/users", clinicAdminOnly, async (req, res, next) => {
   try {
     const users = await db
       .select({
@@ -88,14 +89,14 @@ router.get("/users", doctorOnly, async (req, res, next) => {
         lastLoginAt: usersTable.lastLoginAt,
       })
       .from(usersTable);
-    res.json({ users });
+    res.json(users);
   } catch (err) {
     next(err);
   }
 });
 
 // GET /api/admin/audit-log — query audit log (doctor-only; for breach investigations)
-router.get("/audit-log", doctorOnly, async (req, res, next) => {
+router.get("/audit-log", clinicAdminOnly, async (req, res, next) => {
   try {
     const { limit = "100", offset = "0" } = req.query as { limit?: string; offset?: string };
     const { auditLogTable } = await import("../lib/db");
@@ -106,7 +107,7 @@ router.get("/audit-log", doctorOnly, async (req, res, next) => {
       .limit(Math.min(parseInt(limit), 500))
       .offset(parseInt(offset));
 
-    res.json({ entries, count: entries.length });
+    res.json(entries);
   } catch (err) {
     next(err);
   }

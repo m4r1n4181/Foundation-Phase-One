@@ -179,7 +179,7 @@ router.post("/verify-dob", async (req, res, next) => {
       outcome: "success",
     });
 
-    res.json({ otpSent: true, phone: maskPhone(appointment.invitedPhone) });
+    res.json({ otpSent: true, phone: maskPhone(appointment.invitedPhone), sessionId: link.id });
   } catch (err) {
     next(err);
   }
@@ -272,7 +272,7 @@ router.post("/verify-otp", async (req, res, next) => {
       })
       .where(eq(preparationLinksTable.id, link.id));
 
-    const sessionToken = signPatientSession(link.id, link.appointmentId);
+    const patientToken = signPatientSession(link.id, link.appointmentId);
 
     await writeAuditLog({
       ctx: linkAuditCtx(link.id, ip),
@@ -282,7 +282,7 @@ router.post("/verify-otp", async (req, res, next) => {
       outcome: "success",
     });
 
-    res.json({ sessionToken });
+    res.json({ patientToken, appointmentId: link.appointmentId });
   } catch (err) {
     next(err);
   }

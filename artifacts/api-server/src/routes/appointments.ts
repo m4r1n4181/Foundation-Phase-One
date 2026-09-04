@@ -146,7 +146,7 @@ router.post("/", adminOnly, async (req, res, next) => {
       .where(eq(appointmentsTable.id, appointment.id));
 
     // TODO: dispatch message via configured channel (Viber/SMS/email)
-    const linkUrl = `${config.APP_BASE_URL}/pripreme/${token}`;
+    const linkUrl = `${config.APP_BASE_URL}/prepare/${token}`;
 
     res.status(201).json({
       appointment: { ...appointment, status: "link_sent" },
@@ -161,7 +161,7 @@ router.post("/", adminOnly, async (req, res, next) => {
 // GET /api/appointments — list appointments (all staff; doctor sees clinical extras)
 router.get("/", staffOnly, async (req, res, next) => {
   try {
-    const { date, doctorId } = req.query as { date?: string; doctorId?: string };
+    const { date, doctorId, status } = req.query as { date?: string; doctorId?: string; status?: string };
 
     // Build date range filter for a specific day
     let rows = await db
@@ -182,7 +182,8 @@ router.get("/", staffOnly, async (req, res, next) => {
         and(
           // Exclude cancelled appointments from clinical views by default
           eq(appointmentsTable.excludedFromClinicalViews, false),
-          doctorId ? eq(appointmentsTable.doctorId, doctorId) : undefined
+          doctorId ? eq(appointmentsTable.doctorId, doctorId) : undefined,
+          status ? eq(appointmentsTable.status, status as typeof appointmentsTable.status.enumValues[number]) : undefined
         )
       )
       .orderBy(appointmentsTable.scheduledAt);
@@ -196,7 +197,7 @@ router.get("/", staffOnly, async (req, res, next) => {
       );
     }
 
-    res.json({ appointments: rows });
+    res.json(rows);
   } catch (err) {
     next(err);
   }
@@ -390,7 +391,7 @@ router.post("/:id/resend-link", adminOnly, async (req, res, next) => {
     }
 
     // TODO: dispatch message via configured channel
-    const linkUrl = `${config.APP_BASE_URL}/pripreme/${link.token}`;
+    const linkUrl = `${config.APP_BASE_URL}/prepare/${link.token}`;
 
     await writeAuditLog({
       ctx: userAuditCtx(userId, req.user!.role, ip),

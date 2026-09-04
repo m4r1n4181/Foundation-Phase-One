@@ -158,7 +158,16 @@ async function seed() {
   let appointmentId: string;
   if (existingAppt) {
     appointmentId = existingAppt.id;
-    console.log(`  ✓  Appointment already exists (id: ${appointmentId})`);
+    await db
+      .update(appointmentsTable)
+      .set({
+        scheduledAt: tomorrow10am(),
+        status: "link_sent",
+        excludedFromClinicalViews: false,
+        updatedAt: new Date(),
+      })
+      .where(eq(appointmentsTable.id, appointmentId));
+    console.log(`  ✓  Appointment refreshed for tomorrow 10:00 (id: ${appointmentId})`);
   } else {
     const scheduledAt = tomorrow10am();
     const [appt] = await db

@@ -84,6 +84,7 @@ router.get("/:appointmentId", requirePatientAuth, async (req, res, next) => {
         status: appointmentsTable.status,
         scheduledAt: appointmentsTable.scheduledAt,
         appointmentType: appointmentsTable.appointmentType,
+        labStatus: appointmentsTable.labStatus,
       })
       .from(appointmentsTable)
       .where(eq(appointmentsTable.id, appointmentId))
@@ -105,6 +106,7 @@ router.get("/:appointmentId", requirePatientAuth, async (req, res, next) => {
         status: appointment.status,
         scheduledAt: appointment.scheduledAt,
         appointmentType: appointment.appointmentType,
+        labStatus: appointment.labStatus,
       },
     });
   } catch (err) {
